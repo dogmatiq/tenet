@@ -1,3 +1,3 @@
-module github.com/dogmatiq/GITHUB_REPO_NAME
+module github.com/dogmatiq/tenet
 
-go 1.21
+go 1.27
