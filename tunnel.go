@@ -41,6 +41,10 @@ type tunnel struct {
 	// errors.
 	peer string
 
+	// handle handles each stream that the other end opens. If it is nil, the
+	// other end may not open streams.
+	handle func(*yamux.Stream)
+
 	// ended is closed when the tunnel has ended, after every stream on the
 	// session has closed.
 	ended chan struct{}
@@ -49,7 +53,9 @@ type tunnel struct {
 	cause error
 }
 
-// newTunnel starts a tunnel over ws.
+// newTunnel starts a tunnel over ws. It calls handle in a new goroutine for
+// each stream that the other end opens. If handle is nil, the tunnel ends as
+// soon as the other end opens a stream.
 //
 // newSession is [yamux.Client] or [yamux.Server]. The two differ only in the
 // IDs that they give the streams that they open, so the two ends of a tunnel
@@ -59,6 +65,7 @@ func newTunnel(
 	cfg tunnelConfig,
 	newSession func(io.ReadWriteCloser, *yamux.Config) (*yamux.Session, error),
 	peer string,
+	handle func(*yamux.Stream),
 ) (*tunnel, error) {
 	// The context bounds the lifetime of the net.Conn, which ends only when the
 	// session closes it.
@@ -73,6 +80,7 @@ func newTunnel(
 	t := &tunnel{
 		session: session,
 		peer:    peer,
+		handle:  handle,
 		ended:   make(chan struct{}),
 	}
 
@@ -87,6 +95,12 @@ func (c tunnelConfig) yamuxConfig() *yamux.Config {
 	cfg.KeepAliveInterval = c.keepAliveInterval
 	cfg.ConnectionWriteTimeout = c.keepAliveTimeout
 	cfg.LogOutput = io.Discard // yamux writes to standard error by default
+
+	// By default, yamux closes the whole session when the other end doesn't
+	// acknowledge a new stream within 75 seconds. A tunnel adds no timeout to
+	// dialing.
+	cfg.StreamOpenTimeout = 0
+
 	return cfg
 }
 
@@ -116,6 +130,55 @@ func (t *tunnel) close(cause error) {
 	<-t.ended
 }
 
+// open opens a new stream to the other end. It returns an error that wraps
+// ctx.Err() as soon as ctx ends, or the tunnel's error once it has ended.
+func (t *tunnel) open(ctx context.Context) (*yamux.Stream, error) {
+	type result struct {
+		stream *yamux.Stream
+		err    error
+	}
+
+	// OpenStream takes no context, and blocks while too many streams wait for
+	// the other end to acknowledge them.
+	done := make(chan result, 1)
+	go func() {
+		s, err := t.session.OpenStream()
+		done <- result{s, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, t.failure(ctx, r.err)
+		}
+		return r.stream, nil
+
+	case <-ctx.Done():
+		go func() {
+			if r := <-done; r.stream != nil {
+				r.stream.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+// failure returns the error to report when an operation on the session fails
+// with err. Once the session has ended, it waits until the tunnel has ended,
+// and returns the tunnel's error.
+func (t *tunnel) failure(ctx context.Context, err error) error {
+	if !t.session.IsClosed() {
+		return err
+	}
+
+	select {
+	case <-t.ended:
+		return t.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // run accepts the streams that the other end opens until the session ends,
 // and then ends the tunnel.
 func (t *tunnel) run() {
@@ -123,9 +186,17 @@ func (t *tunnel) run() {
 		stream, err := t.session.AcceptStream()
 
 		if err == nil {
-			// This end doesn't expect streams, so it closes each one that the
-			// other end opens.
-			stream.Close()
+			if t.handle != nil {
+				go t.handle(stream)
+				continue
+			}
+
+			// yamux would keep whatever the other end writes to an unwanted
+			// stream, even after this end closes it, so the tunnel ends
+			// instead. AcceptStream then returns the session's error, and the
+			// loop ends below.
+			t.setCause(fmt.Errorf("the %s broke the tunneling protocol by opening a stream", t.peer))
+			t.session.Close()
 			continue
 		}
 

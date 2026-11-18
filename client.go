@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
+	"syscall"
 
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
@@ -78,6 +80,10 @@ type Client struct {
 	// each attempt to connect.
 	closed context.Context
 	close  context.CancelFunc
+
+	m         sync.Mutex
+	isClosed  bool
+	listeners map[addr]*Listener
 }
 
 // run connects to the server, and waits until the tunnel ends or the [Client]
@@ -123,7 +129,56 @@ func (c *Client) open() (*tunnel, error) {
 
 	// The Dialer at the other end opens the streams, so this end's session is
 	// yamux's server.
-	return newTunnel(ws, c.cfg.tunnelConfig, yamux.Server, "server")
+	return newTunnel(ws, c.cfg.tunnelConfig, yamux.Server, "server", c.route)
+}
+
+// route answers a stream that the server opens, and queues it for the
+// [Listener] for its address if there is one. It doesn't wait for the
+// [Listener] to accept it.
+func (c *Client) route(s *yamux.Stream) {
+	a, err := readAddr(s)
+	if err != nil {
+		s.Close()
+		return
+	}
+
+	c.m.Lock()
+	l := c.listeners[a]
+	c.m.Unlock()
+
+	ans := refused
+	if l != nil {
+		ans = l.reserve()
+	}
+
+	if ans != accepted {
+		writeAnswer(s, ans)
+		s.Close()
+		return
+	}
+
+	if err := writeAnswer(s, ans); err != nil {
+		l.release()
+		s.Close()
+		return
+	}
+
+	l.enqueue(&conn{
+		stream: s,
+		local:  a,
+		remote: a.unnamed(),
+	})
+}
+
+// remove forgets l, so that [Client.Listen] may be called again for its
+// address.
+func (c *Client) remove(l *Listener) {
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	if c.listeners[l.addr] == l {
+		delete(c.listeners, l.addr)
+	}
 }
 
 // Listen returns a [Listener] for network and address. Each connection that
@@ -142,7 +197,36 @@ func (c *Client) open() (*tunnel, error) {
 // [syscall.EINVAL] if network or address is too long. It returns
 // [net.ErrClosed] once [Client.Close] has been called.
 func (c *Client) Listen(network, address string) (*Listener, error) {
-	panic("not implemented")
+	a := addr{network, address}
+
+	if err := a.validate(); err != nil {
+		return nil, &net.OpError{Op: "listen", Net: network, Addr: a, Err: err}
+	}
+
+	c.m.Lock()
+	defer c.m.Unlock()
+
+	if c.isClosed {
+		return nil, net.ErrClosed
+	}
+
+	if _, ok := c.listeners[a]; ok {
+		return nil, &net.OpError{Op: "listen", Net: network, Addr: a, Err: syscall.EADDRINUSE}
+	}
+
+	l := &Listener{
+		client: c,
+		addr:   a,
+		queue:  make(chan *conn, backlog),
+		closed: make(chan struct{}),
+	}
+
+	if c.listeners == nil {
+		c.listeners = map[addr]*Listener{}
+	}
+	c.listeners[a] = l
+
+	return l, nil
 }
 
 // Close stops the [Client] from connecting again, and closes each of its
@@ -151,6 +235,17 @@ func (c *Client) Listen(network, address string) (*Listener, error) {
 //
 // Close may be called more than once, and always returns nil.
 func (c *Client) Close() error {
+	c.m.Lock()
+	c.isClosed = true
+	listeners := c.listeners
+	c.listeners = nil
+	c.m.Unlock()
+
+	for _, l := range listeners {
+		l.Close()
+	}
+
 	c.close()
+
 	return nil
 }

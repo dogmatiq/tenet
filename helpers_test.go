@@ -1,6 +1,9 @@
 package tenet_test
 
 import (
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,6 +89,76 @@ func connect(t testing.TB, url string, options ...ConnectOption) *Client {
 	t.Cleanup(func() { c.Close() })
 
 	return c
+}
+
+// openTunnel opens a tunnel between a new [Client] and a new server, and
+// returns the [Client] and the [Dialer] at the two ends.
+func openTunnel(t testing.TB, options ...ConnectOption) (*Client, *Dialer) {
+	t.Helper()
+
+	s := startServer(t)
+	obs := newTunnelRecorder()
+
+	c := connect(t, s.URL, append(options, WithClientObserver(obs))...)
+	d := receive(t, s.Dialers)
+	receive(t, obs.Opened)
+
+	return c, d
+}
+
+// listen calls [Client.Listen], and fails the test if it returns an error.
+func listen(t testing.TB, c *Client, network, address string) *Listener {
+	t.Helper()
+
+	l, err := c.Listen(network, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+
+	return l
+}
+
+// dial opens a connection with d, and returns the [Dialer]'s end of it, and
+// the [Listener]'s end that l accepts.
+func dial(t testing.TB, d *Dialer, l *Listener) (dialerEnd, listenerEnd net.Conn) {
+	t.Helper()
+
+	a := l.Addr()
+
+	dialerEnd, err := d.DialContext(t.Context(), a.Network(), a.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dialerEnd.Close() })
+
+	listenerEnd, err = l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listenerEnd.Close() })
+
+	return dialerEnd, listenerEnd
+}
+
+// expectEnd fails the test unless reading from r reaches its end, with
+// [io.EOF] or another error, soon.
+func expectEnd(t testing.TB, r interface {
+	io.Reader
+	SetReadDeadline(time.Time) error
+}) {
+	t.Helper()
+
+	if err := r.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := io.Copy(io.Discard, r)
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatal("timed out waiting for the end of the stream")
+	}
 }
 
 // tunnelRecorder is a [ClientObserver] that sends each call to a channel.

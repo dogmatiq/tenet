@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"syscall"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
@@ -56,8 +59,9 @@ func Accept(
 		return nil, err
 	}
 
-	// The Dialer opens the streams, so its session is yamux's client.
-	t, err := newTunnel(ws, cfg.tunnelConfig, yamux.Client, "client")
+	// The Dialer opens the streams, so its session is yamux's client. The
+	// client may not open any.
+	t, err := newTunnel(ws, cfg.tunnelConfig, yamux.Client, "client", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +98,64 @@ func (d *Dialer) DialContext(
 	ctx context.Context,
 	network, address string,
 ) (net.Conn, error) {
-	panic("not implemented")
+	remote := addr{network, address}
+
+	fail := func(err error) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: network, Addr: remote, Err: err}
+	}
+
+	if err := remote.validate(); err != nil {
+		return fail(err)
+	}
+
+	s, err := d.tunnel.open(ctx)
+	if err != nil {
+		return fail(err)
+	}
+
+	// Interrupt the exchange below as soon as ctx ends.
+	stop := context.AfterFunc(ctx, func() {
+		s.SetDeadline(time.Unix(1, 0))
+	})
+
+	ans, err := exchange(s, remote)
+
+	if !stop() {
+		s.Close()
+		return fail(ctx.Err())
+	}
+
+	if err != nil {
+		s.Close()
+
+		if d.tunnel.session.IsClosed() {
+			return fail(d.tunnel.failure(ctx, err))
+		}
+
+		// The client closes or resets the stream without an answer only when
+		// it can't take the stream at all, such as when it can't read the
+		// address.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, yamux.ErrConnectionReset) {
+			return fail(syscall.ECONNRESET)
+		}
+
+		return fail(err)
+	}
+
+	switch ans {
+	case refused:
+		s.Close()
+		return fail(syscall.ECONNREFUSED)
+	case backlogFull:
+		s.Close()
+		return fail(syscall.ECONNRESET)
+	}
+
+	return &conn{
+		stream: s,
+		local:  remote.unnamed(),
+		remote: remote,
+	}, nil
 }
 
 // Done returns a channel that is closed when the tunnel ends. By then, every
