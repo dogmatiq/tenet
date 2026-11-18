@@ -4,43 +4,44 @@ import (
 	"net"
 )
 
-// A Listener accepts the connections that a [Dialer] dials through the
-// WebSocket that [Listen] connects.
+// A Listener is a [net.Listener] for the connections that the server opens with
+// [Dialer.DialContext] for one network and address.
 //
-// A Listener is a [net.Listener], so a server can serve it in the same way as
-// any other [net.Listener].
+// Obtain a Listener by calling [Client.Listen]. A Listener may be used until
+// [Listener.Close] or [Client.Close] is called.
 type Listener struct{}
 
-// Accept waits for the next connection that the [Dialer] at the other end of
-// the WebSocket dials, and returns it. It keeps waiting while the [Listener]
-// connects again after a WebSocket ends.
+// Accept waits for the next connection that the server opens to the
+// [Listener]'s network and address, and returns the [Listener]'s end of it.
 //
-// It returns [net.ErrClosed] once [Listener.Close] is called, and an error that
-// wraps ctx.Err() once the context given to [Listen] is canceled. Those are the
-// only errors that it returns, so the server that serves the [Listener] keeps
-// serving it while the [Listener] connects again.
+// It returns [net.ErrClosed] once [Listener.Close] or [Client.Close] is called.
+// It returns no other error, so a function such as [http.Server.Serve] that
+// serves the [Listener] keeps serving it while the [Client] connects again.
 //
-// The [net.Conn.LocalAddr] and [net.Conn.RemoteAddr] methods of the connection
-// return addresses whose [net.Addr.Network] method returns "tenet". Their
-// [net.Addr.String] methods describe the WebSocket server, for display only.
+// The connection's [net.Conn.LocalAddr] method returns the address that
+// [Listener.Addr] returns. Its [net.Conn.RemoteAddr] method returns an address
+// with the same network, whose string form is empty.
 func (l *Listener) Accept() (net.Conn, error) {
 	panic("not implemented")
 }
 
-// Close stops the [Listener] from connecting again. No new connections open,
-// and new calls to [Dialer.Dial] at the other end of the WebSocket fail at
-// once. The connections that are already open stay open until the server that
-// serves the [Listener] closes them, and the WebSocket ends after the last one
-// closes.
+// Close stops the [Listener] from accepting connections. Connections that the
+// server has opened, but that [Listener.Accept] has not returned, are closed.
+// Connections that [Listener.Accept] has returned stay open until they are
+// closed.
+//
+// After Close, a call to [Dialer.DialContext] for the [Listener]'s network and
+// address returns an error that wraps [syscall.ECONNREFUSED], and
+// [Client.Listen] may be called again for that network and address.
 //
 // Close may be called more than once, and always returns nil.
 func (l *Listener) Close() error {
 	panic("not implemented")
 }
 
-// Addr returns the [Listener]'s address. Its [net.Addr.Network] method returns
-// "tenet". Its [net.Addr.String] method describes the WebSocket server, for
-// display only.
+// Addr returns the [Listener]'s address. Its [net.Addr.Network] and
+// [net.Addr.String] methods return the network and address that were given to
+// [Client.Listen].
 func (l *Listener) Addr() net.Addr {
 	panic("not implemented")
 }
