@@ -10,6 +10,7 @@ import (
 
 // conn is one end of a connection through a tunnel. It is a [net.Conn].
 type conn struct {
+	tunnel *tunnel
 	stream *yamux.Stream
 	local  addr
 	remote addr
@@ -20,15 +21,20 @@ type conn struct {
 }
 
 func (c *conn) Read(b []byte) (int, error) {
-	return c.stream.Read(b)
+	n, err := c.stream.Read(b)
+	c.tunnel.checkWrite(err)
+	return n, err
 }
 
 func (c *conn) Write(b []byte) (int, error) {
-	return c.stream.Write(b)
+	n, err := c.stream.Write(b)
+	c.tunnel.checkWrite(err)
+	return n, err
 }
 
 func (c *conn) Close() error {
 	err := c.stream.Close()
+	c.tunnel.checkWrite(err)
 
 	if c.onClose != nil {
 		c.closeOnce.Do(c.onClose)

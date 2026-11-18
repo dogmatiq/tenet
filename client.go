@@ -219,6 +219,7 @@ func (c *Client) route(t *tunnel, s *yamux.Stream) {
 	t.connOpened()
 
 	l.enqueue(&conn{
+		tunnel:  t,
 		stream:  s,
 		local:   a,
 		remote:  a.unnamed(),

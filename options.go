@@ -63,7 +63,12 @@ func WithClientObserver(o ClientObserver) ConnectOption {
 //
 // It panics if d is not positive.
 func WithKeepAliveInterval(d time.Duration) Option {
-	panic("not implemented")
+	if d <= 0 {
+		panic("tenet: keep-alive interval must be positive")
+	}
+	return tunnelOption(func(cfg *tunnelConfig) {
+		cfg.keepAliveInterval = d
+	})
 }
 
 // WithKeepAliveTimeout returns an [Option] that sets how long the other end of
@@ -72,7 +77,12 @@ func WithKeepAliveInterval(d time.Duration) Option {
 //
 // It panics if d is not positive.
 func WithKeepAliveTimeout(d time.Duration) Option {
-	panic("not implemented")
+	if d <= 0 {
+		panic("tenet: keep-alive timeout must be positive")
+	}
+	return tunnelOption(func(cfg *tunnelConfig) {
+		cfg.keepAliveTimeout = d
+	})
 }
 
 // WithBackoff returns a [ConnectOption] that sets the [Client]'s backoff
@@ -162,4 +172,16 @@ type connectOption func(*connectConfig)
 
 func (o connectOption) applyToConnect(c *connectConfig) {
 	o(c)
+}
+
+// tunnelOption is an [Option] that changes a [tunnelConfig], at either end of a
+// tunnel.
+type tunnelOption func(*tunnelConfig)
+
+func (o tunnelOption) applyToConnect(c *connectConfig) {
+	o(&c.tunnelConfig)
+}
+
+func (o tunnelOption) applyToAccept(c *acceptConfig) {
+	o(&c.tunnelConfig)
 }

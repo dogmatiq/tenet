@@ -127,6 +127,7 @@ func (d *Dialer) DialContext(
 
 	if err != nil {
 		s.Close()
+		d.tunnel.checkWrite(err)
 
 		if d.tunnel.session.IsClosed() {
 			return fail(d.tunnel.failure(ctx, err))
@@ -152,6 +153,7 @@ func (d *Dialer) DialContext(
 	}
 
 	return &conn{
+		tunnel: d.tunnel,
 		stream: s,
 		local:  remote.unnamed(),
 		remote: remote,

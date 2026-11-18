@@ -184,6 +184,66 @@ func TestWithBackoff(t *testing.T) {
 	})
 }
 
+func TestWithKeepAliveInterval(t *testing.T) {
+	t.Run("when it is given more than once", func(t *testing.T) {
+		t.Run("it uses the last interval", func(t *testing.T) {
+			s, _, _, obs := openMemoryTunnel(
+				t,
+				nil,
+				WithKeepAliveInterval(time.Hour),
+				WithKeepAliveInterval(50*time.Millisecond),
+				WithKeepAliveTimeout(50*time.Millisecond),
+			)
+
+			s.LoseNetwork()
+			start := time.Now()
+
+			receive(t, obs.Ended)
+			if got, limit := time.Since(start), 100*time.Millisecond+slack; got > limit {
+				t.Fatalf("the Client's end took %s, want at most %s", got, limit)
+			}
+		})
+	})
+
+	t.Run("it panics if d is not positive", func(t *testing.T) {
+		for _, d := range []time.Duration{0, -time.Second} {
+			expectPanic(t, func() {
+				WithKeepAliveInterval(d)
+			})
+		}
+	})
+}
+
+func TestWithKeepAliveTimeout(t *testing.T) {
+	t.Run("when it is given more than once", func(t *testing.T) {
+		t.Run("it uses the last timeout", func(t *testing.T) {
+			s, _, _, obs := openMemoryTunnel(
+				t,
+				nil,
+				WithKeepAliveInterval(50*time.Millisecond),
+				WithKeepAliveTimeout(time.Hour),
+				WithKeepAliveTimeout(50*time.Millisecond),
+			)
+
+			s.LoseNetwork()
+			start := time.Now()
+
+			receive(t, obs.Ended)
+			if got, limit := time.Since(start), 100*time.Millisecond+slack; got > limit {
+				t.Fatalf("the Client's end took %s, want at most %s", got, limit)
+			}
+		})
+	})
+
+	t.Run("it panics if d is not positive", func(t *testing.T) {
+		for _, d := range []time.Duration{0, -time.Second} {
+			expectPanic(t, func() {
+				WithKeepAliveTimeout(d)
+			})
+		}
+	})
+}
+
 // clientWithHeader returns an [http.Client] that adds a header to each request
 // that it sends.
 func clientWithHeader(name, value string) *http.Client {

@@ -2,6 +2,7 @@ package tenet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -215,6 +216,8 @@ func (t *tunnel) open(ctx context.Context) (*yamux.Stream, error) {
 // with err. Once the session has ended, it waits until the tunnel has ended,
 // and returns the tunnel's error.
 func (t *tunnel) failure(ctx context.Context, err error) error {
+	t.checkWrite(err)
+
 	if !t.session.IsClosed() {
 		return err
 	}
@@ -250,11 +253,26 @@ func (t *tunnel) run() {
 
 		// After the session ends, AcceptStream returns why it ended. Before,
 		// it returns an error only when it fails to answer one stream.
+		t.checkWrite(err)
 		if t.session.IsClosed() {
 			t.end(err)
 			return
 		}
 	}
+}
+
+// checkWrite ends the tunnel if err shows that the other end didn't accept a
+// write within the keep-alive timeout.
+//
+// yamux returns that error to the writer, but doesn't end the session, so each
+// operation on the session that can write passes its error here.
+func (t *tunnel) checkWrite(err error) {
+	if !errors.Is(err, yamux.ErrConnectionWriteTimeout) {
+		return
+	}
+
+	t.setCause(fmt.Errorf("the %s didn't accept a write within the keep-alive timeout: %w", t.peer, err))
+	t.session.Close()
 }
 
 // end ends the tunnel after its session has ended because of err.

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,118 +353,106 @@ func TestReconnecting(t *testing.T) {
 		})
 	})
 
+	// These tests open tunnels, so they run in real time, outside a synctest
+	// bubble. yamux keeps a pool of timers that all sessions share, and a
+	// timer made inside a bubble must never be used outside it.
+
 	t.Run("it counts the calls to the backoff policy since a tunnel last opened", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var accepting atomic.Bool
-			dialers := make(chan *Dialer, 10)
+		var accepting atomic.Bool
+		dialers := make(chan *Dialer, 10)
 
-			s := startMemoryServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !accepting.Load() {
-					http.Error(w, "not yet", http.StatusServiceUnavailable)
-					return
-				}
-
-				d, err := Accept(w, r)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				dialers <- d
-			}))
-
-			calls := make(chan int, 10)
-			connect(
-				t,
-				s.URL,
-				WithHTTPClient(s.Client),
-				WithBackoff(func(n int, _ error) time.Duration {
-					calls <- n
-					return time.Second
-				}),
-			)
-
-			for want := 1; want <= 3; want++ {
-				if got := <-calls; got != want {
-					t.Fatalf("got n = %d, want %d", got, want)
-				}
+		s := startMemoryServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !accepting.Load() {
+				http.Error(w, "not yet", http.StatusServiceUnavailable)
+				return
 			}
 
-			// The Client waits a second before its next attempt, so it sees
-			// this change.
-			accepting.Store(true)
-
-			d := <-dialers
-			d.Close()
-
-			if got := <-calls; got != 1 {
-				t.Fatalf("got n = %d after a tunnel opened, want 1", got)
+			d, err := Accept(w, r)
+			if err != nil {
+				t.Error(err)
+				return
 			}
+			t.Cleanup(func() { d.Close() })
+			dialers <- d
+		}))
 
-			accepting.Store(false)
-		})
+		calls := make(chan int, 100)
+		connect(
+			t,
+			s.URL,
+			WithHTTPClient(s.Client),
+			WithBackoff(func(n int, _ error) time.Duration {
+				calls <- n
+				if n == 3 {
+					accepting.Store(true)
+				}
+				return 0
+			}),
+		)
+
+		for want := 1; want <= 3; want++ {
+			if got := receive(t, calls); got != want {
+				t.Fatalf("got n = %d, want %d", got, want)
+			}
+		}
+
+		d := receive(t, dialers)
+		d.Close()
+
+		if got := receive(t, calls); got != 1 {
+			t.Fatalf("got n = %d after a tunnel opened, want 1", got)
+		}
 	})
 
 	t.Run("it calls TunnelEnded exactly once for each call to TunnelOpened", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var attempts atomic.Int64
+		var attempts atomic.Int64
 
-			// Refuse every other attempt, and end each tunnel at once.
-			s := startMemoryServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if attempts.Add(1)%2 == 1 {
-					http.Error(w, "not this time", http.StatusServiceUnavailable)
-					return
-				}
-
-				d, err := Accept(w, r)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				d.Close()
-			}))
-
-			obs := &eventRecorder{}
-			c := connect(
-				t,
-				s.URL,
-				WithHTTPClient(s.Client),
-				WithClientObserver(obs),
-				WithBackoff(func(int, error) time.Duration { return time.Second }),
-			)
-
-			time.Sleep(time.Minute)
-			c.Close()
-			synctest.Wait()
-
-			open := false
-			opened := 0
-			for _, e := range obs.Events() {
-				switch e {
-				case "opened":
-					if open {
-						t.Fatal("TunnelOpened was called twice without TunnelEnded between")
-					}
-					open = true
-					opened++
-				case "ended":
-					if !open {
-						t.Fatal("TunnelEnded was called without TunnelOpened before it")
-					}
-					open = false
-				case "failed":
-					if open {
-						t.Fatal("TunnelFailed was called while a tunnel was open")
-					}
-				}
+		// Refuse every other attempt, and end each tunnel at once.
+		s := startMemoryServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1)%2 == 1 {
+				http.Error(w, "not this time", http.StatusServiceUnavailable)
+				return
 			}
 
-			if open {
-				t.Fatal("the last call to TunnelOpened has no call to TunnelEnded")
+			d, err := Accept(w, r)
+			if err != nil {
+				t.Error(err)
+				return
 			}
-			if opened < 2 {
-				t.Fatalf("got %d tunnels, want at least 2", opened)
+			d.Close()
+		}))
+
+		calls := make(chan string, 100)
+		connect(
+			t,
+			s.URL,
+			WithHTTPClient(s.Client),
+			WithClientObserver(&eventRecorder{Calls: calls}),
+			WithBackoff(func(int, error) time.Duration { return 0 }),
+		)
+
+		// Check the calls for three tunnels, and the failed attempts around
+		// them.
+		open := false
+		for opened := 0; opened < 3 || open; {
+			switch receive(t, calls) {
+			case "opened":
+				if open {
+					t.Fatal("TunnelOpened was called twice without TunnelEnded between")
+				}
+				open = true
+				opened++
+			case "ended":
+				if !open {
+					t.Fatal("TunnelEnded was called without TunnelOpened before it")
+				}
+				open = false
+			case "failed":
+				if open {
+					t.Fatal("TunnelFailed was called while a tunnel was open")
+				}
 			}
-		})
+		}
 	})
 
 	t.Run("it calls the observer one call at a time, and waits for each call", func(t *testing.T) {
@@ -604,14 +591,16 @@ func refuse(attempts chan<- time.Time) http.Handler {
 	})
 }
 
-// eventRecorder is a [ClientObserver] that records the name of each call, in
-// order, and notices calls that overlap.
+// eventRecorder is a [ClientObserver] that sends the name of each call to a
+// channel, and notices calls that overlap.
 type eventRecorder struct {
+	// Calls, if it isn't nil, receives "opened", "ended" or "failed" for each
+	// call, in order.
+	Calls chan<- string
+
 	// OnFailed, if it isn't nil, is called by TunnelFailed.
 	OnFailed func()
 
-	m          sync.Mutex
-	events     []string
 	inCall     atomic.Bool
 	overlapped atomic.Bool
 }
@@ -637,13 +626,6 @@ func (r *eventRecorder) TunnelFailed(error) {
 	}
 }
 
-// Events returns the name of each call so far, in order.
-func (r *eventRecorder) Events() []string {
-	r.m.Lock()
-	defer r.m.Unlock()
-	return slices.Clone(r.events)
-}
-
 // Overlapped returns true if a call started while another was running.
 func (r *eventRecorder) Overlapped() bool {
 	return r.overlapped.Load()
@@ -654,9 +636,14 @@ func (r *eventRecorder) enter(name string) {
 		r.overlapped.Store(true)
 	}
 
-	r.m.Lock()
-	r.events = append(r.events, name)
-	r.m.Unlock()
+	if r.Calls != nil {
+		// Once a test stops reading, later calls are dropped, so that they
+		// can't block the Client.
+		select {
+		case r.Calls <- name:
+		default:
+		}
+	}
 }
 
 func (r *eventRecorder) leave() {
