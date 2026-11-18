@@ -37,7 +37,8 @@ type Dialer struct{}
 // The network and address are used to route the connection to the listener with
 // the same network and address, as created by [Client.Listen]. If the client
 // has no such [Listener], DialContext returns an error that wraps
-// [syscall.ECONNREFUSED].
+// [syscall.ECONNREFUSED]. It returns an error that wraps [syscall.EINVAL] if
+// network is longer than 64 bytes or address is longer than 448 bytes.
 //
 // The connection's [net.Conn.RemoteAddr] method returns an address matching
 // the given network and address. Its [net.Conn.LocalAddr] method returns an

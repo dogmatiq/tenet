@@ -27,15 +27,16 @@ type Client struct{}
 // address goes to that [Listener].
 //
 // network and address may be any strings, such as "tcp" and
-// "api.internal:443".
+// "api.internal:443". network is limited to 64 bytes, and address to 448 bytes.
 //
 // The [Listener] may be used until [Listener.Close] or [Client.Close] is
 // called.
 //
 // Listen returns an error that wraps [syscall.EADDRINUSE] if the [Client]
 // already has an open [Listener] for the same network and address, as a TCP
-// listen on a port that is already in use does. It returns [net.ErrClosed]
-// once [Client.Close] has been called.
+// listen on a port that is already in use does. It returns an error that wraps
+// [syscall.EINVAL] if network or address is too long. It returns
+// [net.ErrClosed] once [Client.Close] has been called.
 func (c *Client) Listen(network, address string) (*Listener, error) {
 	panic("not implemented")
 }

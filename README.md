@@ -3,8 +3,8 @@
 # Tenet
 
 Tenet reverses the direction of TCP-style connections. One program connects to
-another over a secure WebSocket, and that program then opens connections back
-through the WebSocket, as if it could connect directly.
+another over a WebSocket, and that program then opens connections back through
+the WebSocket, as if it could connect directly.
 
 [![Documentation](https://img.shields.io/badge/go.dev-documentation-007d9c?&style=for-the-badge)](https://pkg.go.dev/github.com/dogmatiq/tenet)
 [![Latest Version](https://img.shields.io/github/tag/dogmatiq/tenet.svg?&style=for-the-badge&label=semver)](https://github.com/dogmatiq/tenet/releases)
@@ -49,7 +49,9 @@ outside the network.
 
 At most 256 connections wait for `Listener.Accept` to accept them. A connection
 beyond that is reset, in the same way as TCP resets a connection beyond its
-backlog. Each connection buffers at most 256 KB in each direction.
+backlog, and the dial for it returns an error that wraps `syscall.ECONNRESET`.
+Each connection buffers at most 256 KB in each direction. A network is at most
+64 bytes, and an address at most 448 bytes.
 
 See the [documentation](https://pkg.go.dev/github.com/dogmatiq/tenet) for the
 API and examples.
