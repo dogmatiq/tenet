@@ -84,7 +84,7 @@ func WithBackoff(f func(n int, err error) time.Duration) ConnectOption {
 // WithHeader returns a [ConnectOption] that sets the HTTP headers that each
 // attempt to connect sends, in addition to the headers that the [http.Client]
 // and the upgrade to a WebSocket add. It copies h, so later changes to h don't
-// affect the [Client].
+// affect the [Client]. It can't replace the headers that the upgrade needs.
 //
 // A value that changes between attempts, such as a token, belongs in the
 // [http.Client] that [WithHTTPClient] sets.
