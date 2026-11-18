@@ -1,7 +1,12 @@
 package tenet_test
 
 import (
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,6 +26,86 @@ func TestWithHTTPClient(t *testing.T) {
 		}
 
 		receive(t, s.Dialers)
+	})
+
+	t.Run("when the client follows redirects", func(t *testing.T) {
+		t.Run("it connects to the URL that it is redirected to", func(t *testing.T) {
+			s := startServer(t)
+			redirect := startRedirect(t, s.Server.URL)
+			obs := newTunnelRecorder()
+
+			connect(t, redirect.URL, WithHTTPClient(&http.Client{}), WithClientObserver(obs))
+
+			receive(t, redirect.Requests)
+			receive(t, s.Dialers)
+			receive(t, obs.Opened)
+		})
+	})
+
+	t.Run("when the client refuses redirects", func(t *testing.T) {
+		t.Run("it fails the attempt without following the redirect", func(t *testing.T) {
+			s := startServer(t)
+			redirect := startRedirect(t, s.Server.URL)
+			obs := newTunnelRecorder()
+
+			connect(
+				t,
+				redirect.URL,
+				WithHTTPClient(&http.Client{
+					CheckRedirect: func(*http.Request, []*http.Request) error {
+						return errors.New("redirects are refused")
+					},
+				}),
+				WithClientObserver(obs),
+			)
+
+			receive(t, redirect.Requests)
+			receive(t, obs.Failed)
+
+			// The http.Client checks a redirect before it sends the request
+			// for it, so a failed attempt never reached the server.
+			if len(s.Headers) != 0 {
+				t.Fatal("the attempt reached the server after the redirect")
+			}
+		})
+	})
+
+	t.Run("it uses the client's proxy settings", func(t *testing.T) {
+		s := startServer(t)
+
+		proxied := make(chan string, 1)
+		proxy := httptest.NewServer(&httputil.ReverseProxy{
+			Rewrite: func(r *httputil.ProxyRequest) {
+				// A request to a forward proxy names its target in full,
+				// so the proxy sends it on to that URL.
+				proxied <- r.In.URL.String()
+				r.Out.URL = r.In.URL
+			},
+		})
+		t.Cleanup(proxy.Close)
+
+		proxyURL, err := url.Parse(proxy.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		obs := newTunnelRecorder()
+		connect(
+			t,
+			s.URL,
+			WithHTTPClient(&http.Client{
+				Transport: &http.Transport{
+					Proxy: http.ProxyURL(proxyURL),
+				},
+			}),
+			WithClientObserver(obs),
+		)
+
+		if got, want := receive(t, proxied), s.Server.URL; !strings.HasPrefix(got, want) {
+			t.Fatalf("the proxy got a request for %q, want one for %q", got, want)
+		}
+		receive(t, s.Dialers)
+		receive(t, obs.Opened)
 	})
 
 	t.Run("when it is given more than once", func(t *testing.T) {
@@ -242,6 +327,35 @@ func TestWithKeepAliveTimeout(t *testing.T) {
 			})
 		}
 	})
+}
+
+// redirectServer is an HTTP server that redirects each request.
+type redirectServer struct {
+	// URL is the server's URL, with the scheme "ws".
+	URL string
+
+	// Requests receives a value for each request.
+	Requests chan struct{}
+}
+
+// startRedirect starts a [redirectServer] that redirects each request to
+// target.
+func startRedirect(t testing.TB, target string) *redirectServer {
+	t.Helper()
+
+	s := &redirectServer{
+		Requests: make(chan struct{}, 10),
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.Requests <- struct{}{}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(srv.Close)
+
+	s.URL = "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	return s
 }
 
 // clientWithHeader returns an [http.Client] that adds a header to each request

@@ -193,6 +193,33 @@ func TestDialer(t *testing.T) {
 			}
 		})
 
+		t.Run("it opens connections that buffer at most 256 KB in each direction", func(t *testing.T) {
+			c, d := openTunnel(t)
+			l := listen(t, c, "tcp", "api.internal:443")
+
+			dialerEnd, listenerEnd := dial(t, d, l)
+
+			// Nothing reads either end, so each write blocks once the
+			// connection's buffer is full, and stops at its deadline. The
+			// deadline is in real time, because yamux can't run in a synctest
+			// bubble, but a slow machine can only make the write shorter.
+			for _, from := range []net.Conn{dialerEnd, listenerEnd} {
+				if err := from.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+
+				n, err := from.Write(make([]byte, 1<<20))
+
+				var netErr net.Error
+				if !errors.As(err, &netErr) || !netErr.Timeout() {
+					t.Fatalf("got %v, want a timeout", err)
+				}
+				if limit := 256 * 1024; n > limit {
+					t.Fatalf("got %d bytes written, want at most %d", n, limit)
+				}
+			}
+		})
+
 		t.Run("it opens and closes connections repeatedly through one tunnel", func(t *testing.T) {
 			c, d := openTunnel(t)
 			l := listen(t, c, "tcp", "api.internal:443")
