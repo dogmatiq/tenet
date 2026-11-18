@@ -18,7 +18,11 @@ import (
 //
 // The returned [Dialer] is not tied to the lifetime of the HTTP handler. It may
 // be used until the tunnel ends.
-func Accept(w http.ResponseWriter, r *http.Request) (*Dialer, error) {
+func Accept(
+	w http.ResponseWriter,
+	r *http.Request,
+	options ...AcceptOption,
+) (*Dialer, error) {
 	panic("not implemented")
 }
 
