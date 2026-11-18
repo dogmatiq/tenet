@@ -43,7 +43,7 @@ type tunnel struct {
 
 	// handle handles each stream that the other end opens. If it is nil, the
 	// other end may not open streams.
-	handle func(*yamux.Stream)
+	handle func(*tunnel, *yamux.Stream)
 
 	// ended is closed when the tunnel has ended, after every stream on the
 	// session has closed.
@@ -51,6 +51,14 @@ type tunnel struct {
 
 	m     sync.Mutex
 	cause error
+
+	// conns is the number of connections that this end has made from the
+	// streams that the other end opened, and that are not closed yet.
+	conns int
+
+	// idleCause is the cause that endWhenIdle was given, or nil if it hasn't
+	// been called.
+	idleCause error
 }
 
 // newTunnel starts a tunnel over ws. It calls handle in a new goroutine for
@@ -65,7 +73,7 @@ func newTunnel(
 	cfg tunnelConfig,
 	newSession func(io.ReadWriteCloser, *yamux.Config) (*yamux.Session, error),
 	peer string,
-	handle func(*yamux.Stream),
+	handle func(*tunnel, *yamux.Stream),
 ) (*tunnel, error) {
 	// The context bounds the lifetime of the net.Conn, which ends only when the
 	// session closes it.
@@ -130,6 +138,46 @@ func (t *tunnel) close(cause error) {
 	<-t.ended
 }
 
+// connOpened records that this end has made a connection from a stream that
+// the other end opened. connClosed must be called when it closes.
+func (t *tunnel) connOpened() {
+	t.m.Lock()
+	defer t.m.Unlock()
+	t.conns++
+}
+
+// connClosed records that a connection that connOpened recorded has closed.
+// If endWhenIdle has been called and this was the last connection, the tunnel
+// ends.
+func (t *tunnel) connClosed() {
+	t.m.Lock()
+	t.conns--
+	cause := t.idleCause
+	idle := cause != nil && t.conns == 0
+	t.m.Unlock()
+
+	if idle {
+		// close waits for the WebSocket's close handshake, which the
+		// connection's Close shouldn't wait for.
+		go t.close(cause)
+	}
+}
+
+// endWhenIdle ends the tunnel because of cause as soon as no connection that
+// connOpened recorded is open, and waits until it has ended.
+func (t *tunnel) endWhenIdle(cause error) {
+	t.m.Lock()
+	t.idleCause = cause
+	idle := t.conns == 0
+	t.m.Unlock()
+
+	if idle {
+		t.close(cause)
+	}
+
+	<-t.ended
+}
+
 // open opens a new stream to the other end. It returns an error that wraps
 // ctx.Err() as soon as ctx ends, or the tunnel's error once it has ended.
 func (t *tunnel) open(ctx context.Context) (*yamux.Stream, error) {
@@ -187,7 +235,7 @@ func (t *tunnel) run() {
 
 		if err == nil {
 			if t.handle != nil {
-				go t.handle(stream)
+				go t.handle(t, stream)
 				continue
 			}
 

@@ -1,6 +1,7 @@
 package tenet
 
 import (
+	"math/rand/v2"
 	"net/http"
 	"time"
 )
@@ -88,7 +89,30 @@ func WithKeepAliveTimeout(d time.Duration) Option {
 //
 // It panics if f is nil.
 func WithBackoff(f func(n int, err error) time.Duration) ConnectOption {
-	panic("not implemented")
+	if f == nil {
+		panic("tenet: nil backoff policy")
+	}
+	return connectOption(func(cfg *connectConfig) {
+		cfg.backoff = f
+	})
+}
+
+// defaultBackoff is the backoff policy that a [Client] uses when it's given no
+// other. It waits 1 second, doubles the wait after each call up to 1 minute,
+// and adds up to a quarter of the wait again, at random.
+func defaultBackoff(n int, _ error) time.Duration {
+	const (
+		first = 1 * time.Second
+		limit = 1 * time.Minute
+	)
+
+	d := first
+	for i := 1; i < n && d < limit; i++ {
+		d *= 2
+	}
+	d = min(d, limit)
+
+	return d + rand.N(d/4+1)
 }
 
 // WithHeader returns a [ConnectOption] that sets the HTTP headers that each
@@ -125,6 +149,7 @@ type connectConfig struct {
 	httpClient *http.Client
 	header     http.Header
 	observer   ClientObserver
+	backoff    func(n int, err error) time.Duration
 }
 
 // acceptConfig holds the settings that [Accept] takes.

@@ -3,6 +3,8 @@ package tenet_test
 import (
 	"net/http"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	. "github.com/dogmatiq/tenet"
 )
@@ -143,6 +145,41 @@ func TestWithClientObserver(t *testing.T) {
 	t.Run("it panics if o is nil", func(t *testing.T) {
 		expectPanic(t, func() {
 			WithClientObserver(nil)
+		})
+	})
+}
+
+func TestWithBackoff(t *testing.T) {
+	t.Run("when it is given more than once", func(t *testing.T) {
+		t.Run("it uses the last policy", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := startMemoryServer(t, refuse(nil))
+				calls := make(chan string, 10)
+
+				connect(
+					t,
+					s.URL,
+					WithHTTPClient(s.Client),
+					WithBackoff(func(int, error) time.Duration {
+						calls <- "first"
+						return time.Second
+					}),
+					WithBackoff(func(int, error) time.Duration {
+						calls <- "last"
+						return time.Second
+					}),
+				)
+
+				if got := <-calls; got != "last" {
+					t.Fatalf("got the %s policy, want the last", got)
+				}
+			})
+		})
+	})
+
+	t.Run("it panics if f is nil", func(t *testing.T) {
+		expectPanic(t, func() {
+			WithBackoff(nil)
 		})
 	})
 }

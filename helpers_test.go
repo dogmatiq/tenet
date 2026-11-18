@@ -161,6 +161,33 @@ func expectEnd(t testing.TB, r interface {
 	}
 }
 
+// expectConnected fails the test unless bytes written to each of a and b
+// arrive at the other.
+func expectConnected(t testing.TB, a, b net.Conn) {
+	t.Helper()
+
+	for _, pair := range [][2]net.Conn{{a, b}, {b, a}} {
+		from, to := pair[0], pair[1]
+
+		if _, err := from.Write([]byte("ping")); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := to.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(to, buf); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := to.SetReadDeadline(time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // tunnelRecorder is a [ClientObserver] that sends each call to a channel.
 type tunnelRecorder struct {
 	Opened chan struct{}

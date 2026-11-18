@@ -2,6 +2,7 @@ package tenet
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -12,6 +13,10 @@ type conn struct {
 	stream *yamux.Stream
 	local  addr
 	remote addr
+
+	// onClose, if it isn't nil, is called the first time Close is called.
+	onClose   func()
+	closeOnce sync.Once
 }
 
 func (c *conn) Read(b []byte) (int, error) {
@@ -23,7 +28,13 @@ func (c *conn) Write(b []byte) (int, error) {
 }
 
 func (c *conn) Close() error {
-	return c.stream.Close()
+	err := c.stream.Close()
+
+	if c.onClose != nil {
+		c.closeOnce.Do(c.onClose)
+	}
+
+	return err
 }
 
 func (c *conn) LocalAddr() net.Addr {

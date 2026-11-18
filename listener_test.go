@@ -3,8 +3,11 @@ package tenet_test
 import (
 	"errors"
 	"io"
+	"net"
 	"syscall"
 	"testing"
+
+	. "github.com/dogmatiq/tenet"
 )
 
 func TestListener(t *testing.T) {
@@ -26,6 +29,72 @@ func TestListener(t *testing.T) {
 			if got, want := string(buf), "ping"; got != want {
 				t.Fatalf("got %q, want %q", got, want)
 			}
+		})
+
+		t.Run("when the Listener is closed", func(t *testing.T) {
+			t.Run("it returns net.ErrClosed", func(t *testing.T) {
+				c, _ := openTunnel(t)
+				l := listen(t, c, "tcp", "api.internal:443")
+
+				errs := make(chan error, 1)
+				go func() {
+					_, err := l.Accept()
+					errs <- err
+				}()
+
+				l.Close()
+
+				if err := receive(t, errs); err != net.ErrClosed {
+					t.Fatalf("got %v, want net.ErrClosed", err)
+				}
+
+				if _, err := l.Accept(); err != net.ErrClosed {
+					t.Fatalf("got %v, want net.ErrClosed", err)
+				}
+			})
+		})
+
+		t.Run("when the Client is closed", func(t *testing.T) {
+			t.Run("it returns net.ErrClosed", func(t *testing.T) {
+				c, _ := openTunnel(t)
+				l := listen(t, c, "tcp", "api.internal:443")
+
+				c.Close()
+
+				if _, err := l.Accept(); err != net.ErrClosed {
+					t.Fatalf("got %v, want net.ErrClosed", err)
+				}
+			})
+		})
+
+		t.Run("when the tunnel ends", func(t *testing.T) {
+			t.Run("it keeps waiting, and returns no error", func(t *testing.T) {
+				s := startServer(t)
+				obs := newTunnelRecorder()
+				c := connect(t, s.URL, WithClientObserver(obs))
+				d := receive(t, s.Dialers)
+				receive(t, obs.Opened)
+
+				l := listen(t, c, "tcp", "api.internal:443")
+
+				errs := make(chan error, 1)
+				go func() {
+					_, err := l.Accept()
+					errs <- err
+				}()
+
+				d.Close()
+				receive(t, obs.Ended)
+
+				// Accept returns only once. If the tunnel's end had made it
+				// return, it would have returned an error other than
+				// net.ErrClosed, because the Listener wasn't closed yet.
+				l.Close()
+
+				if err := receive(t, errs); err != net.ErrClosed {
+					t.Fatalf("got %v, want net.ErrClosed", err)
+				}
+			})
 		})
 
 		t.Run("it returns connections with the Listener's address as their local address", func(t *testing.T) {
@@ -58,6 +127,43 @@ func TestListener(t *testing.T) {
 			_, err := d.DialContext(t.Context(), "tcp", "api.internal:443")
 			if !errors.Is(err, syscall.ECONNREFUSED) {
 				t.Fatalf("got %v, want an error that wraps ECONNREFUSED", err)
+			}
+		})
+
+		t.Run("it closes the connections that wait to be accepted", func(t *testing.T) {
+			c, d := openTunnel(t)
+			l := listen(t, c, "tcp", "api.internal:443")
+
+			dialerEnd, err := d.DialContext(t.Context(), "tcp", "api.internal:443")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dialerEnd.Close()
+
+			l.Close()
+
+			expectEnd(t, dialerEnd)
+		})
+
+		t.Run("it leaves open the connections that Accept returned", func(t *testing.T) {
+			c, d := openTunnel(t)
+			l := listen(t, c, "tcp", "api.internal:443")
+
+			dialerEnd, listenerEnd := dial(t, d, l)
+
+			l.Close()
+
+			expectConnected(t, dialerEnd, listenerEnd)
+		})
+
+		t.Run("it can be called more than once", func(t *testing.T) {
+			c, _ := openTunnel(t)
+			l := listen(t, c, "tcp", "api.internal:443")
+
+			for range 2 {
+				if err := l.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 

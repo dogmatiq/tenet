@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
@@ -34,6 +35,7 @@ func Connect(url string, options ...ConnectOption) (*Client, error) {
 		tunnelConfig: newTunnelConfig(),
 		httpClient:   http.DefaultClient,
 		observer:     nopObserver{},
+		backoff:      defaultBackoff,
 	}
 	for _, o := range options {
 		o.applyToConnect(&cfg)
@@ -86,12 +88,41 @@ type Client struct {
 	listeners map[addr]*Listener
 }
 
-// run connects to the server, and waits until the tunnel ends or the [Client]
-// is closed.
+// run keeps a tunnel open to the server until the [Client] is closed.
 func (c *Client) run() {
+	// n counts the calls to the backoff policy since a tunnel was last
+	// opened.
+	n := 0
+
+	for {
+		opened, err := c.serve()
+
+		if c.closed.Err() != nil {
+			return
+		}
+
+		if opened {
+			n = 0
+		}
+		n++
+
+		if !c.wait(c.cfg.backoff(n, err)) {
+			return
+		}
+	}
+}
+
+// serve makes one attempt to open a tunnel, and if it opens, waits until it
+// ends. It returns whether the tunnel opened, and why the attempt failed or the
+// tunnel ended.
+func (c *Client) serve() (opened bool, _ error) {
 	t, err := c.open()
 	if err != nil {
-		return
+		// An attempt that fails because Close was called isn't reported.
+		if c.closed.Err() == nil {
+			c.cfg.observer.TunnelFailed(err)
+		}
+		return false, err
 	}
 
 	c.cfg.observer.TunnelOpened()
@@ -99,10 +130,32 @@ func (c *Client) run() {
 	select {
 	case <-t.Done():
 	case <-c.closed.Done():
-		t.close(net.ErrClosed)
+		// The connections that are open stay open, and the tunnel ends after
+		// the last one closes.
+		t.endWhenIdle(net.ErrClosed)
 	}
 
-	c.cfg.observer.TunnelEnded(t.Err())
+	err = t.Err()
+	c.cfg.observer.TunnelEnded(err)
+
+	return true, err
+}
+
+// wait waits for d, and returns true, unless the [Client] is closed first.
+func (c *Client) wait(d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+
+	t := time.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-t.C:
+		return true
+	case <-c.closed.Done():
+		return false
+	}
 }
 
 // open makes one attempt to open a tunnel to the server.
@@ -135,7 +188,7 @@ func (c *Client) open() (*tunnel, error) {
 // route answers a stream that the server opens, and queues it for the
 // [Listener] for its address if there is one. It doesn't wait for the
 // [Listener] to accept it.
-func (c *Client) route(s *yamux.Stream) {
+func (c *Client) route(t *tunnel, s *yamux.Stream) {
 	a, err := readAddr(s)
 	if err != nil {
 		s.Close()
@@ -163,10 +216,13 @@ func (c *Client) route(s *yamux.Stream) {
 		return
 	}
 
+	t.connOpened()
+
 	l.enqueue(&conn{
-		stream: s,
-		local:  a,
-		remote: a.unnamed(),
+		stream:  s,
+		local:   a,
+		remote:  a.unnamed(),
+		onClose: t.connClosed,
 	})
 }
 
