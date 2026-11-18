@@ -1,36 +1,8 @@
 package tenet
 
 import (
-	"context"
 	"net"
-	"net/http"
 )
-
-// Listen connects to the WebSocket server at url, and returns a [Listener] that
-// accepts the connections that the WebSocket server dials through the
-// WebSocket. The WebSocket server's [http.Handler] passes the request to
-// [Accept], and dials with the [Dialer] that [Accept] returns.
-//
-// Listen returns at once, and connects in the background. It connects again
-// whenever the WebSocket ends, until ctx is canceled or the [Listener] is
-// closed. Canceling ctx ends the WebSocket and every connection on it at once.
-//
-// Each attempt to connect is an HTTP request made with httpClient, so its
-// redirects, proxy and TLS settings apply to it as they do to any other
-// request. Each attempt sends a copy of header. A value that changes between
-// attempts, such as a token that expires, belongs in httpClient's
-// [http.Client.Transport] instead.
-//
-// Listen returns an error only if url isn't a valid URL, or its scheme isn't
-// "ws" or "wss".
-func Listen(
-	ctx context.Context,
-	httpClient *http.Client,
-	url string,
-	header http.Header,
-) (*Listener, error) {
-	panic("not implemented")
-}
 
 // A Listener accepts the connections that a [Dialer] dials through the
 // WebSocket that [Listen] connects.
