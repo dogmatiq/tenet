@@ -24,3 +24,11 @@ type ClientObserver interface {
 	// it failed.
 	TunnelFailed(err error)
 }
+
+// nopObserver is a [ClientObserver] that does nothing. A [Client] uses it when
+// it's given no other.
+type nopObserver struct{}
+
+func (nopObserver) TunnelOpened()      {}
+func (nopObserver) TunnelEnded(error)  {}
+func (nopObserver) TunnelFailed(error) {}

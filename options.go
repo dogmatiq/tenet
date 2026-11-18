@@ -9,14 +9,14 @@ import (
 //
 // If the same option is given more than once, the last one applies.
 type ConnectOption interface {
-	applyToConnect()
+	applyToConnect(*connectConfig)
 }
 
 // An AcceptOption is an option that [Accept] takes.
 //
 // If the same option is given more than once, the last one applies.
 type AcceptOption interface {
-	applyToAccept()
+	applyToAccept(*acceptConfig)
 }
 
 // An Option is both a [ConnectOption] and an [AcceptOption], so [Connect] and
@@ -33,7 +33,12 @@ type Option interface {
 //
 // It panics if c is nil.
 func WithHTTPClient(c *http.Client) ConnectOption {
-	panic("not implemented")
+	if c == nil {
+		panic("tenet: nil HTTP client")
+	}
+	return connectOption(func(cfg *connectConfig) {
+		cfg.httpClient = c
+	})
 }
 
 // WithClientObserver returns a [ConnectOption] that sets the [ClientObserver]
@@ -42,7 +47,12 @@ func WithHTTPClient(c *http.Client) ConnectOption {
 //
 // It panics if o is nil.
 func WithClientObserver(o ClientObserver) ConnectOption {
-	panic("not implemented")
+	if o == nil {
+		panic("tenet: nil client observer")
+	}
+	return connectOption(func(cfg *connectConfig) {
+		cfg.observer = o
+	})
 }
 
 // WithKeepAliveInterval returns an [Option] that sets how often one end of a
@@ -89,5 +99,42 @@ func WithBackoff(f func(n int, err error) time.Duration) ConnectOption {
 // A value that changes between attempts, such as a token, belongs in the
 // [http.Client] that [WithHTTPClient] sets.
 func WithHeader(h http.Header) ConnectOption {
-	panic("not implemented")
+	h = h.Clone()
+	return connectOption(func(cfg *connectConfig) {
+		cfg.header = h
+	})
+}
+
+// tunnelConfig holds the settings that both ends of a tunnel take.
+type tunnelConfig struct {
+	keepAliveInterval time.Duration
+	keepAliveTimeout  time.Duration
+}
+
+// newTunnelConfig returns a [tunnelConfig] with the default settings.
+func newTunnelConfig() tunnelConfig {
+	return tunnelConfig{
+		keepAliveInterval: 15 * time.Second,
+		keepAliveTimeout:  10 * time.Second,
+	}
+}
+
+// connectConfig holds the settings that [Connect] takes.
+type connectConfig struct {
+	tunnelConfig
+	httpClient *http.Client
+	header     http.Header
+	observer   ClientObserver
+}
+
+// acceptConfig holds the settings that [Accept] takes.
+type acceptConfig struct {
+	tunnelConfig
+}
+
+// connectOption is a [ConnectOption] that changes a [connectConfig].
+type connectOption func(*connectConfig)
+
+func (o connectOption) applyToConnect(c *connectConfig) {
+	o(c)
 }

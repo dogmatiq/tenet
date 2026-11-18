@@ -2,8 +2,13 @@ package tenet
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
+
+	"github.com/coder/websocket"
+	"github.com/hashicorp/yamux"
 )
 
 // Accept upgrades r to a WebSocket, and returns a [Dialer] that opens
@@ -23,14 +28,50 @@ func Accept(
 	r *http.Request,
 	options ...AcceptOption,
 ) (*Dialer, error) {
-	panic("not implemented")
+	cfg := acceptConfig{
+		tunnelConfig: newTunnelConfig(),
+	}
+	for _, o := range options {
+		o.applyToAccept(&cfg)
+	}
+
+	// The WebSocket library negotiates no subprotocol for a client that offers
+	// none, and the error response can't be written after the upgrade, so
+	// Accept checks the subprotocol itself, first.
+	if !offersSubprotocol(r) {
+		msg := fmt.Sprintf("the client must offer the %q WebSocket subprotocol", subprotocol)
+		http.Error(w, msg, http.StatusBadRequest)
+		return nil, errors.New(msg)
+	}
+
+	ws, err := websocket.Accept(
+		w,
+		r,
+		&websocket.AcceptOptions{
+			Subprotocols: []string{subprotocol},
+		},
+	)
+	if err != nil {
+		// websocket.Accept has already written an HTTP error response.
+		return nil, err
+	}
+
+	// The Dialer opens the streams, so its session is yamux's client.
+	t, err := newTunnel(ws, cfg.tunnelConfig, yamux.Client, "client")
+	if err != nil {
+		return nil, err
+	}
+
+	return &Dialer{t}, nil
 }
 
 // A Dialer is the server's half of a tunnel to a [Client].
 //
 // Obtain a Dialer by calling [Accept] within an HTTP handler that is serving a
 // request initiated by [Connect].
-type Dialer struct{}
+type Dialer struct {
+	tunnel *tunnel
+}
 
 // DialContext opens a connection to the client's [Listener] over the tunnel.
 //
@@ -60,14 +101,14 @@ func (d *Dialer) DialContext(
 // connection through the tunnel has ended, and calls to [Dialer.DialContext]
 // fail.
 func (d *Dialer) Done() <-chan struct{} {
-	panic("not implemented")
+	return d.tunnel.Done()
 }
 
 // Err returns nil until the channel that [Dialer.Done] returns is closed. Then
 // it returns why the tunnel ended. It returns [net.ErrClosed] if [Dialer.Close]
 // ended it.
 func (d *Dialer) Err() error {
-	panic("not implemented")
+	return d.tunnel.Err()
 }
 
 // Close ends the tunnel and every connection through it.
@@ -76,5 +117,6 @@ func (d *Dialer) Err() error {
 // does nothing. Close always returns nil. It returns an error only so that a
 // [Dialer] is an [io.Closer].
 func (d *Dialer) Close() error {
-	panic("not implemented")
+	d.tunnel.close(net.ErrClosed)
+	return nil
 }
